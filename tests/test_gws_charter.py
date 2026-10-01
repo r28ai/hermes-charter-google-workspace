@@ -38,6 +38,8 @@ def google():
             200, json={"access_token": "ya29.fresh", "expires_in": 3600, "token_type": "Bearer"}))
         mock.get(host=GMAIL, path="/gmail/v1/users/me/profile").mock(
             return_value=httpx.Response(200, json={"emailAddress": OWN}))
+        mock.get(host=GMAIL, path="/gmail/v1/users/me/settings/sendAs", name="send_as").mock(
+            return_value=httpx.Response(200, json={"sendAs": [{"sendAsEmail": OWN}]}))
         sent = []
 
         def send(request):
@@ -49,10 +51,16 @@ def google():
         yield mock
 
 
-def original(mock, headers, message_id="m1", thread_id="t1"):
-    mock.get(host=GMAIL, path=f"/gmail/v1/users/me/messages/{message_id}").mock(return_value=httpx.Response(
-        200, json={"id": message_id, "threadId": thread_id,
-                   "payload": {"headers": [{"name": k, "value": v} for k, v in headers.items()]}}))
+def original(mock, headers, message_id="m1", thread_id="t1", snippet=None, body=None):
+    payload = {"headers": [{"name": k, "value": v} for k, v in headers.items()]}
+    if body is not None:
+        payload["mimeType"] = "text/plain"
+        payload["body"] = {"data": base64.urlsafe_b64encode(body.encode()).decode(), "size": len(body)}
+    message = {"id": message_id, "threadId": thread_id, "payload": payload}
+    if snippet:
+        message["snippet"] = snippet
+    mock.get(host=GMAIL, path=f"/gmail/v1/users/me/messages/{message_id}").mock(
+        return_value=httpx.Response(200, json=message))
 
 
 def wire(body):
@@ -116,6 +124,39 @@ def test_reply_all_keeps_everyone_but_you(skill, google, capsys):
     assert [a.addr_spec for a in msg["Cc"].addresses] == ["cy@example.com"]
 
 
+def test_reply_to_a_message_sent_from_an_alias_goes_to_its_recipients(skill, google, capsys):
+    google["send_as"].return_value = httpx.Response(
+        200, json={"sendAs": [{"sendAsEmail": OWN}, {"sendAsEmail": "support@example.com"}]})
+    original(google, {"From": "Support <support@example.com>", "To": "Client <client@example.com>",
+                      "Subject": "Ticket 7", "Message-ID": "<f@x>"})
+    run(skill, capsys, "gmail", "reply", "m1", "--body", "following up")
+    _, msg = wire(google.sent[0])
+    assert [a.addr_spec for a in msg["To"].addresses] == ["client@example.com"]
+
+
+def test_reply_still_works_when_aliases_cannot_be_listed(skill, google, capsys):
+    google["send_as"].return_value = httpx.Response(403, json={"error": {"message": "insufficient scope"}})
+    original(google, {"From": f"Me <{OWN}>", "To": "Shop <shop@example.com>", "Subject": "x", "Message-ID": "<g@x>"})
+    code, _, _ = run(skill, capsys, "gmail", "reply", "m1", "--body", "ok")
+    assert code == 0
+    _, msg = wire(google.sent[0])
+    assert [a.addr_spec for a in msg["To"].addresses] == ["shop@example.com"]
+
+
+def test_reply_to_a_note_to_yourself_comes_back_to_you(skill, google, capsys):
+    original(google, {"From": f"Me <{OWN}>", "To": f"Me <{OWN}>", "Subject": "todo", "Message-ID": "<h@x>"})
+    code, _, _ = run(skill, capsys, "gmail", "reply", "m1", "--body", "done")
+    assert code == 0
+    _, msg = wire(google.sent[0])
+    assert [a.addr_spec for a in msg["To"].addresses] == [OWN]
+
+
+def test_get_normalises_line_endings(skill, google, capsys):
+    original(google, {"From": "Ann <ann@example.com>", "To": OWN, "Subject": "Hi"}, body="line one\r\nline two\r\n")
+    code, out, _ = run(skill, capsys, "gmail", "get", "m1")
+    assert code == 0 and out["body"] == "line one\nline two\n"
+
+
 def test_reply_prefers_reply_to(skill, google, capsys):
     original(google, {"From": "Noreply <noreply@example.com>", "Reply-To": "Desk <desk@example.com>",
                       "To": OWN, "Subject": "Ticket", "Message-ID": "<e@x>"})
@@ -164,11 +205,12 @@ def test_a_line_break_in_a_header_is_refused_and_nothing_is_sent(skill, google, 
 def test_search_returns_headers_for_each_match(skill, google, capsys):
     google.get(host=GMAIL, path="/gmail/v1/users/me/messages").mock(return_value=httpx.Response(
         200, json={"messages": [{"id": "m1", "threadId": "t1"}]}))
-    original(google, {"From": "Ann <ann@example.com>", "To": OWN, "Subject": "Hi", "Date": "Thu, 1 Oct 2026"})
+    original(google, {"From": "Ann <ann@example.com>", "To": OWN, "Subject": "Hi", "Date": "Thu, 1 Oct 2026"},
+             snippet="You&#39;re invited &amp; welcome")
     code, out, _ = run(skill, capsys, "gmail", "search", "is:unread", "--max", "5")
     assert code == 0
     assert out == [{"id": "m1", "threadId": "t1", "from": "Ann <ann@example.com>", "to": OWN,
-                    "subject": "Hi", "date": "Thu, 1 Oct 2026", "snippet": ""}]
+                    "subject": "Hi", "date": "Thu, 1 Oct 2026", "snippet": "You're invited & welcome"}]
 
 
 def test_missing_token_is_a_readable_error(skill, google, capsys, tmp_path, monkeypatch):

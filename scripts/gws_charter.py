@@ -26,6 +26,7 @@ Output is JSON on stdout. Errors are JSON on stderr, with exit code 1.
 import argparse
 import asyncio
 import base64
+import html
 import json
 import os
 import sys
@@ -115,20 +116,46 @@ class GetProfile(BaseModel):
     userId: Annotated[str, PathParam()] = "me"
 
 
-def profile_tool(credentials: OAuth2Client):
-    google = oauth_tool_factory(
-        pack="gmail_profile",
-        provider="google",
-        base_url="https://gmail.googleapis.com/",
-        credential_provider=credentials,
-    )
-    return google(
-        name="users_get_profile",
-        description="The authenticated account's Gmail address.",
-        method="GET",
-        url_template="gmail/v1/users/{userId}/profile",
-        args_schema=GetProfile,
-    )
+class ListSendAs(BaseModel):
+    userId: Annotated[str, PathParam()] = "me"
+
+
+class Account:
+    """Which addresses are "me": the account's own, plus its send-as aliases."""
+
+    def __init__(self, credentials: OAuth2Client):
+        google = oauth_tool_factory(
+            pack="gmail_account",
+            provider="google",
+            base_url="https://gmail.googleapis.com/",
+            credential_provider=credentials,
+        )
+        self.profile = google(
+            name="users_get_profile",
+            description="The authenticated account's Gmail address.",
+            method="GET",
+            url_template="gmail/v1/users/{userId}/profile",
+            args_schema=GetProfile,
+        )
+        self.send_as = google(
+            name="users_settings_send_as_list",
+            description="The addresses this account can send as (its aliases).",
+            method="GET",
+            url_template="gmail/v1/users/{userId}/settings/sendAs",
+            args_schema=ListSendAs,
+        )
+
+    async def addresses(self) -> Tuple[str, set]:
+        primary = (await self.profile.ainvoke({})).get("emailAddress", "")
+        if not primary:
+            raise SkillError("users.getProfile returned no emailAddress.")
+        mine = {primary.lower()}
+        try:
+            listed = await self.send_as.ainvoke({})
+            mine |= {a["sendAsEmail"].lower() for a in (listed or {}).get("sendAs", []) if a.get("sendAsEmail")}
+        except Exception:
+            pass  # aliases refine the check; the account's own address is enough to go on
+        return primary, mine
 
 
 # ---------------------------------------------------------------------------
@@ -156,29 +183,34 @@ def _dedupe(addresses: List[Tuple[str, str]], skip: set) -> List[Tuple[str, str]
     return out
 
 
-def reply_recipients(headers: Dict[str, str], own: str, reply_all: bool) -> Tuple[List[str], List[str]]:
+def reply_recipients(
+    headers: Dict[str, str], primary: str, mine: set, reply_all: bool
+) -> Tuple[List[str], List[str]]:
     """(to, cc) for a reply.
 
-    Reply-To wins over From. Replying to a message you sent yourself goes to
-    that message's recipients, never back to you. --all keeps everyone else
-    on the thread. Your own address is never a recipient.
+    Reply-To wins over From. Replying to a message you sent yourself, from your
+    address or any send-as alias, goes to that message's recipients, never back
+    to you. --all keeps everyone else on the thread. You are never a recipient,
+    except on a note to yourself, whose reply comes back to you.
     """
-    own = own.lower()
     sender = _addresses(headers.get("reply-to") or headers.get("from"))
     original_to = _addresses(headers.get("to"))
     original_cc = _addresses(headers.get("cc"))
 
-    if sender and all(addr.lower() == own for _, addr in sender):
+    if sender and all(addr.lower() in mine for _, addr in sender):
         to = original_to
         cc = original_cc if reply_all else []
     else:
         to = sender + (original_to if reply_all else [])
         cc = original_cc if reply_all else []
 
-    to = _dedupe(to, {own})
-    cc = _dedupe(cc, {own} | {addr.lower() for _, addr in to})
+    to = _dedupe(to, mine)
+    cc = _dedupe(cc, mine | {addr.lower() for _, addr in to})
     if not to:
-        raise SkillError("Cannot work out who to reply to from the original message's headers.")
+        if any(addr.lower() in mine for _, addr in sender + original_to + original_cc):
+            to = [("", primary)]
+        else:
+            raise SkillError("Cannot work out who to reply to from the original message's headers.")
     return [_format(*a) for a in to], [_format(*a) for a in cc]
 
 
@@ -225,7 +257,8 @@ async def cmd_search(args) -> Any:
         out.append({
             "id": message.get("id"), "threadId": message.get("threadId"),
             "from": h.get("from", ""), "to": h.get("to", ""), "subject": h.get("subject", ""),
-            "date": h.get("date", ""), "snippet": message.get("snippet", ""),
+            # Gmail snippets arrive HTML-escaped ("You&#39;re")
+            "date": h.get("date", ""), "snippet": html.unescape(message.get("snippet", "")),
         })
     return out
 
@@ -237,7 +270,7 @@ async def cmd_get(args) -> Any:
         "id": message.get("id"), "threadId": message.get("threadId"),
         "from": h.get("from", ""), "to": h.get("to", ""), "cc": h.get("cc", ""),
         "subject": h.get("subject", ""), "date": h.get("date", ""),
-        "labels": message.get("labelIds", []), "body": message.get("bodyText", ""),
+        "labels": message.get("labelIds", []), "body": message.get("bodyText", "").replace("\r\n", "\n"),
         "attachments": message.get("attachments", []),
     }
 
@@ -252,15 +285,13 @@ async def cmd_send(args) -> Any:
     return await _deliver(content, args.thread_id, args.dry_run)
 
 
-async def cmd_reply(args, profile) -> Any:
+async def cmd_reply(args, account: "Account") -> Any:
     original = await gmail.messages_get.ainvoke(
         {"id": args.message_id, "format": "metadata", "metadataHeaders": REPLY_HEADERS}
     )
     h = _lower(original.get("headers"))
-    own = (await profile.ainvoke({})).get("emailAddress", "")
-    if not own:
-        raise SkillError("users.getProfile returned no emailAddress.")
-    to, cc = reply_recipients(h, own, args.all)
+    primary, mine = await account.addresses()
+    to, cc = reply_recipients(h, primary, mine, args.all)
 
     content: Dict[str, Any] = {"to": to, "subject": reply_subject(h.get("subject", "")), "body": args.body}
     if cc:
@@ -315,7 +346,7 @@ async def run(argv: Optional[List[str]] = None) -> Any:
         return await cmd_get(args)
     if args.command == "send":
         return await cmd_send(args)
-    return await cmd_reply(args, profile_tool(credentials))
+    return await cmd_reply(args, Account(credentials))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

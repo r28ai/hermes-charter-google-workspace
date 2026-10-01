@@ -23,7 +23,8 @@ that declares the Gmail API and builds its wire format at runtime. Nothing in th
 skill assembles MIME by hand, so the things that break in hand-built email are
 handled in one tested place:
 
-- A reply to a message **you** sent goes to that message's recipients, not back to you.
+- A reply to a message **you** sent, from your address or any send-as alias, goes to
+  that message's recipients, not back to you.
 - Non-ASCII display names (`"Jörg Müller" <jorg@example.de>`) are encoded on the
   name only, so Gmail accepts them in To, Cc, Bcc, From and Reply-To.
 - An Outlook `RE:` subject is not prefixed a second time.
