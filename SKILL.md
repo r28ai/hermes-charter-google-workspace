@@ -49,8 +49,11 @@ python -m pip install 'charter-ai>=0.2.5'
 - `scripts/gws_charter.py` — the CLI below. Prints JSON; errors are JSON on stderr with exit code 1.
 
 ```bash
-CG="python $(find "${HERMES_HOME:-$HOME/.hermes}/skills" -path '*google-workspace-charter/scripts/gws_charter.py' | head -1)"
+CG="python ${HERMES_SKILL_DIR}/scripts/gws_charter.py"
 ```
+
+If the line above still contains `HERMES_SKILL_DIR`, template substitution is off:
+use the `[Skill directory: ...]` path shown when this skill loaded.
 
 ## Gmail
 
