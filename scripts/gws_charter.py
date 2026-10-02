@@ -125,7 +125,7 @@ class Account:
 
     def __init__(self, credentials: OAuth2Client):
         google = oauth_tool_factory(
-            pack="gmail_account",
+            pack="gmail-account",
             provider="google",
             base_url="https://gmail.googleapis.com/",
             credential_provider=credentials,
