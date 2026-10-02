@@ -17,7 +17,7 @@ is nothing new to authorize. Version 0.1 covers Gmail; Calendar and Sheets come 
 
 ```bash
 hermes skills install https://raw.githubusercontent.com/r28ai/hermes-charter-google-workspace/main/SKILL.md
-python -m pip install 'charter-ai>=0.2.5'
+python -m pip install 'charter-ai>=0.2.7'
 ```
 
 Usage is in [SKILL.md](SKILL.md).

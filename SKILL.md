@@ -41,7 +41,7 @@ Version 0.1 covers Gmail. Calendar and Sheets come next.
 2. Install Charter into the Python that runs Hermes skills:
 
 ```bash
-python -m pip install 'charter-ai>=0.2.5'
+python -m pip install 'charter-ai>=0.2.7'
 ```
 
 ## Scripts
@@ -93,6 +93,8 @@ people on it, run the reply with `--dry-run` first and confirm the recipients.
 
 - `--from` with an address other than the account's own needs that address set up
   as a Send As alias in Gmail settings.
-- `get` returns the message's plain-text part when it has one. A few marketing
-  emails ship a short plain-text summary next to a much longer HTML version.
-  If a body looks truncated, open the message in Gmail.
+- `get` reads text from every nested part, so a message with attachments still
+  has its body. When the plain-text part is a stub ("View this email in your
+  browser") beside a longer HTML version, `body` is the HTML's text instead.
+  A message forwarded as an attachment (`message/rfc822`) is not read inside;
+  open that one in Gmail.

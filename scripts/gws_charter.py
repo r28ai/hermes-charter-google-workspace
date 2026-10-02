@@ -35,7 +35,7 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional, Tuple
 
-INSTALL_HINT = "python -m pip install 'charter-ai>=0.2.5'"
+INSTALL_HINT = "python -m pip install 'charter-ai>=0.2.7'"
 
 try:
     from charter import Path as PathParam
